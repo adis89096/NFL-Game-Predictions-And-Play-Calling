@@ -7,17 +7,21 @@ import numpy as np
 import pandas as pd
 import nflreadpy as nfl
 from pandasql import sqldf
-from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 
 from model import FEATURES
+from data_cleaning import (ROLL_WINDOW, ADJUST_OPPONENTS, ADJ_LOOKBACK_WEEKS, ADJ_ALPHA, current_adjusted_ratings)
 
 NSIMS = 1000
 
 
-def build_frozen_ratings(teamWeek):
-    """Freeze each team's rating as the average of its last 3 played weeks."""
-    return sqldf("""
+def build_current_ratings(teamWeek, window=ROLL_WINDOW, adjust=ADJUST_OPPONENTS, adjLookback=ADJ_LOOKBACK_WEEKS, adjAlpha=ADJ_ALPHA):
+    """
+    Each team's rating = average of its last 3 PLAYED weeks.
+    Since teamWeek now includes 2026, this is a live rating: it rolls
+    forward every time you re-run after new games are played.
+    """
+    ratings = sqldf(f"""
         WITH ranked AS (
             SELECT team, season, week, off_epa, def_epa, plays,
                 ROW_NUMBER() OVER (PARTITION BY team ORDER BY season DESC, week DESC) AS rn
@@ -28,14 +32,26 @@ def build_frozen_ratings(teamWeek):
                 AVG(def_epa) AS def_epa_frozen,
                 AVG(plays) AS plays_frozen
         FROM ranked
-        WHERE rn <= 3
+        WHERE rn <= {int(window)}
         GROUP BY team
     """, locals())
+
+    if adjust:
+        adj = current_adjusted_ratings(teamWeek, adjLookback, adjAlpha)
+        ratings = (ratings.drop(columns=["off_epa_frozen", "def_epa_frozen"]).merge(adj, on="team", how="inner"))
+
+    return ratings
+
 
 
 def build_2026_matchups(frozen_ratings):
     """Attach frozen home/away ratings onto the 2026 schedule."""
+    
     schedule2026 = nfl.load_schedules([2026]).to_pandas()
+    nTotal = len(schedule2026)
+    schedule2026 = schedule2026[schedule2026["home_score"].isna()].copy()
+    print(f"{nTotal} games in schedule -> {len(schedule2026)} unplayed")
+
 
     home = frozen_ratings.rename(columns={
         "team": "home_team", "off_epa_frozen": "home_off_epa",
@@ -48,6 +64,7 @@ def build_2026_matchups(frozen_ratings):
 
     simGames = sqldf("""
         SELECT s.game_id, s.season, s.week, s.home_team, s.away_team,
+               s.home_reset, s.away_reset,
                h.home_off_epa, h.home_def_epa, h.home_plays,
                a.away_off_epa, a.away_def_epa, a.away_plays
         FROM schedule2026 s
@@ -73,9 +90,11 @@ def train_margin_total_models(games):
     yMargin = gameReg["margin"]
     yTotal = gameReg["total"]
 
-    X_train, X_test, ym_train, ym_test, yt_train, yt_test = train_test_split(
-        X, yMargin, yTotal, random_state=42, test_size=0.3
-    )
+    # Time-based split: fit on the past, measure the noise on the future.
+    isTrain = gameReg["season"] <= 2023
+    X_train, X_test = X[isTrain], X[~isTrain]
+    ym_train, ym_test = yMargin[isTrain], yMargin[~isTrain]
+    yt_train, yt_test = yTotal[isTrain], yTotal[~isTrain]
 
     marginModel = LinearRegression().fit(X_train, ym_train)
     totalModel = LinearRegression().fit(X_train, yt_train)
@@ -83,7 +102,7 @@ def train_margin_total_models(games):
     # NOTE: carried over from the original notebook — this uses marginModel's
     # predictions rather than totalModel's, so it isn't really measuring the
     # total-points model's residual spread. Left as-is during the split.
-    totalResidSTD = (yt_test - marginModel.predict(X_test)).std()
+    totalResidSTD = (yt_test - totalModel.predict(X_test)).std()
 
     print(f"Margin Residual STD: {marginResidSTD:.2f} points")
     print(f"Total Residual STD: {totalResidSTD:.2f} points")
@@ -142,7 +161,7 @@ if __name__ == "__main__":
     from data_cleaning import load_and_clean_games
 
     games, teamWeek = load_and_clean_games()
-    frozen_ratings = build_frozen_ratings(teamWeek)
+    frozen_ratings = build_current_ratings(teamWeek)
     print(frozen_ratings)
 
     simGames = build_2026_matchups(frozen_ratings)
