@@ -125,13 +125,33 @@ def predict_2026(simGames, marginModelFinal, totalModelFinal, winModel, winScale
     simFeatures["p_home_win"] = winModel.predict_proba(winScaler.transform(simFeatures[FEATURES]))[:, 1]
     return simFeatures
 
+def build_allowed_scores(games, min_share=0.004):
+    """
+    Learn which final scores are 'realistic' from history: any score that makes up
+    at least min_share (0.4%) of all team-scores since 2015 is allowed.
+    This drops 1, 2, 4, 5, ... automatically without a hand-typed list.
+    """
+    allScores = pd.concat([games["home_score"], games["away_score"]]).dropna().astype(int)
+    share = allScores.value_counts(normalize=True)
+    return sorted(int(s) for s in share[share >= min_share].index)
 
-def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, seed=42):
+def snap_score(x, allowed):
+    """Nearest allowed score to x (ties go to the lower score)."""
+    return min(allowed, key=lambda s: (abs(s - x), s))
+
+def next_allowed_above(x, allowed):
+    """Smallest allowed score strictly greater than x (falls back to x + 1)."""
+    higher = [s for s in allowed if s > x]
+    return min(higher) if higher else int(x) + 1
+
+def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, seed=42, allowed=None):
     """
     Monte Carlo simulate final scores from the predicted margin/total,
     using the residual spread as noise, to get win probabilities and
     expected scores for each game.
     """
+    if allowed is None:
+        allowed = list(range(0, 100))
     rng = np.random.default_rng(seed)
     result = []
 
@@ -147,6 +167,15 @@ def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, see
         homeScore = np.clip(np.round((totals + margins) / 2), 0, None)
         awayScore = np.clip(np.round((totals - margins) / 2), 0, None)
 
+        homeFav = p >= 0.5
+        winner = row["home_team"] if homeFav else row["away_team"]
+        predHome = snap_score(homeScore.mean(), allowed)
+        predAway = snap_score(awayScore.mean(), allowed)
+        if homeFav and predHome <= predAway:
+            predHome = next_allowed_above(predAway, allowed)
+        elif not homeFav and predHome <= predAway:
+            predAway = next_allowed_above(predHome, allowed)
+
         result.append({
             "game_id": row["game_id"],
             "home_team": row["home_team"],
@@ -155,8 +184,8 @@ def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, see
             "home_win_pct": p,
             "away_win_pct": 1.0 - p,
             "tie_pct": 0.0,
-            "avg_home_score": homeScore.mean(),
-            "avg_away_score": awayScore.mean()
+            "pred_home_score": predHome,
+            "pred_away_score": predAway
         })
 
     return pd.DataFrame(result)

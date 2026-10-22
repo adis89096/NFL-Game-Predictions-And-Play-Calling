@@ -7,10 +7,8 @@ from pathlib import Path
 from data_cleaning import load_and_clean_games
 from model import train_game_predictor, fit_win_model
 from evaluation import evaluate_models
-from simulation import (
-    build_current_ratings, build_2026_matchups,
-    train_margin_total_models, predict_2026, simulate_scores
-)
+from simulation import (build_current_ratings, build_2026_matchups, train_margin_total_models, 
+                        predict_2026, simulate_scores, build_allowed_scores)
 
 if __name__ == "__main__":
     games, teamWeek = load_and_clean_games()
@@ -30,9 +28,12 @@ if __name__ == "__main__":
     simFeatures = predict_2026(simGames, marginModelFinal, totalModelFinal, winModel, winScaler)
 
     pd.set_option("display.max_rows", None)
-    simResults = simulate_scores(simFeatures, marginResidSTD, totalResidSTD)
+    allowedScores = build_allowed_scores(games)
+    print("Allowed scores: ", allowedScores)
+
+    simResults = simulate_scores(simFeatures, marginResidSTD, totalResidSTD, allowed=allowedScores)
     simResults = simResults.merge(simFeatures[["game_id", "pred_margin", "pred_total"]], on="game_id")
-    simResults = simResults.sort_values(["week", "game_id"]).round(2)
+    simResults = simResults.sort_values(["week", "game_id"]).round(3)
 
     outPath = Path(__file__).parent / "sim_results_2026_updated.csv"
     simResults.to_csv(outPath, index=True)
