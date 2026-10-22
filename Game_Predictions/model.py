@@ -12,6 +12,20 @@ BASE_FEATURE = ["home_off_epa", "away_off_epa", "home_def_epa", "away_def_epa", 
 CONTEXT_FEATURES = ["home_rest", "away_rest"]
 FEATURES = BASE_FEATURE + CONTEXT_FEATURES
 
+def fit_win_model(games, train_through=None):
+    """
+    Fit the logistic win model (scaler + LogisticRegression) on completed games.
+    train_through=None -> use ALL games (what the simulation uses for 2026).
+    train_through=2023 -> only seasons <= 2023 (what evaluation.py uses to test).
+    One function, so what gets scored is exactly what drives the win percentages.
+    """
+    g = games.dropna(subset=FEATURES + ["result"])
+    if train_through is not None:
+        g = g[g["season"] <= train_through]
+    scaler = StandardScaler().fit(g[FEATURES])
+    model = LogisticRegression().fit(scaler.transform(g[FEATURES]), g["result"])
+    return model, scaler
+
 
 def train_game_predictor(games):
     """
@@ -59,6 +73,7 @@ if __name__ == "__main__":
     from data_cleaning import load_and_clean_games
 
     games, _ = load_and_clean_games()
+    
     train_game_predictor(games)
 
 

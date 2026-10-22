@@ -189,12 +189,14 @@ def load_and_clean_games(rollWindow=ROLL_WINDOW, regOnly=REG_SEASON, wp=WIN_PROB
             ON s.away_team = a.away_team AND s.season = a.season AND s.week = a.week
     """, locals())
 
+    games["margin"] = games["result"]
     games["result"] = games["result_encoded"]
-    games = games.drop(columns=["result_encoded"])
+    games = games.drop(columns="result_encoded")
 
     assert games["result"].isin([0, 1]).all(), \
         "result has unexpected values — ties should have been dropped upstream"
 
+    games = games.sort_values(["season", "week"]).reset_index(drop=True)
     return games, teamWeek
 
 

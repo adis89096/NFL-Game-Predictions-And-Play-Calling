@@ -11,12 +11,9 @@ Step 0: one time-based scorecard used for EVERY model change.
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                             f1_score, brier_score_loss, log_loss)
-
-from model import FEATURES
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, brier_score_loss, log_loss)
+from model import FEATURES, fit_win_model
 
 # name -> (which games to score, fit models on seasons <= this)
 TEST_SETS = {
@@ -47,8 +44,7 @@ def _score(label, y, p):
 def _fit_all(g, train_through):
     """Fit every model on seasons <= train_through; return what scoring needs."""
     train = g[g["season"] <= train_through]
-    scaler = StandardScaler().fit(train[FEATURES])
-    logit = LogisticRegression().fit(scaler.transform(train[FEATURES]), train["result"])
+    logit, scaler = fit_win_model(g, train_through)
 
     reg = LinearRegression().fit(train[FEATURES], train["margin"])
     margin_sd = (train["margin"] - reg.predict(train[FEATURES])).std()   # noise used for P(win)

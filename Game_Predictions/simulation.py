@@ -8,8 +8,8 @@ import pandas as pd
 import nflreadpy as nfl
 from pandasql import sqldf
 from sklearn.linear_model import LinearRegression
-
-from model import FEATURES
+from scipy.stats import norm
+from model import FEATURES, fit_win_model
 from data_cleaning import (ROLL_WINDOW, ADJUST_OPPONENTS, ADJ_LOOKBACK_WEEKS, ADJ_ALPHA, current_adjusted_ratings)
 
 NSIMS = 1000
@@ -64,7 +64,7 @@ def build_2026_matchups(frozen_ratings):
 
     simGames = sqldf("""
         SELECT s.game_id, s.season, s.week, s.home_team, s.away_team,
-               s.home_reset, s.away_reset,
+               s.home_rest, s.away_rest,
                h.home_off_epa, h.home_def_epa, h.home_plays,
                a.away_off_epa, a.away_def_epa, a.away_plays
         FROM schedule2026 s
@@ -99,9 +99,6 @@ def train_margin_total_models(games):
     marginModel = LinearRegression().fit(X_train, ym_train)
     totalModel = LinearRegression().fit(X_train, yt_train)
     marginResidSTD = (ym_test - marginModel.predict(X_test)).std()
-    # NOTE: carried over from the original notebook — this uses marginModel's
-    # predictions rather than totalModel's, so it isn't really measuring the
-    # total-points model's residual spread. Left as-is during the split.
     totalResidSTD = (yt_test - totalModel.predict(X_test)).std()
 
     print(f"Margin Residual STD: {marginResidSTD:.2f} points")
@@ -115,14 +112,17 @@ def train_margin_total_models(games):
     return marginModelFinal, totalModelFinal, marginResidSTD, totalResidSTD
 
 
-def predict_2026(simGames, marginModelFinal, totalModelFinal, target_weeks=None):
-    """Apply the fitted margin/total models to the 2026 matchups."""
+def predict_2026(simGames, marginModelFinal, totalModelFinal, winModel, winScaler, target_weeks=None):
+    """Apply the fitted margin/total models to the 2026 matchups.
+       margin/total regression -> expected points, logistic model -> P(home win)
+    """
     simFeatures = simGames.dropna(subset=FEATURES).copy()
     if target_weeks is not None:
         simFeatures = simFeatures[simFeatures["week"].isin(target_weeks)]
 
     simFeatures["pred_margin"] = marginModelFinal.predict(simFeatures[FEATURES])
     simFeatures["pred_total"] = totalModelFinal.predict(simFeatures[FEATURES])
+    simFeatures["p_home_win"] = winModel.predict_proba(winScaler.transform(simFeatures[FEATURES]))[:, 1]
     return simFeatures
 
 
@@ -136,7 +136,12 @@ def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, see
     result = []
 
     for _, row in simFeatures.iterrows():
-        margins = rng.normal(row["pred_margin"], marginResidSTD, nsims)
+        pMargin = float(norm.cdf(row["pred_margin"] / marginResidSTD))
+        p = 0.5 * float(row["p_home_win"]) + 0.5 * pMargin
+        # margin centre implied by the logistic probability (clip avoids +/-inf)
+        impliedMargin = marginResidSTD * norm.ppf(np.clip(p, 0.01, 0.99))
+
+        margins = rng.normal(impliedMargin, marginResidSTD, nsims)
         totals = rng.normal(row["pred_total"], totalResidSTD, nsims)
 
         homeScore = np.clip(np.round((totals + margins) / 2), 0, None)
@@ -147,9 +152,9 @@ def simulate_scores(simFeatures, marginResidSTD, totalResidSTD, nsims=NSIMS, see
             "home_team": row["home_team"],
             "away_team": row["away_team"],
             "week": row["week"],
-            "home_win_pct": (homeScore > awayScore).mean(),
-            "away_win_pct": (awayScore > homeScore).mean(),
-            "tie_pct": (homeScore == awayScore).mean(),
+            "home_win_pct": p,
+            "away_win_pct": 1.0 - p,
+            "tie_pct": 0.0,
             "avg_home_score": homeScore.mean(),
             "avg_away_score": awayScore.mean()
         })
@@ -167,7 +172,8 @@ if __name__ == "__main__":
     simGames = build_2026_matchups(frozen_ratings)
     marginModelFinal, totalModelFinal, marginResidSTD, totalResidSTD = train_margin_total_models(games)
 
-    simFeatures = predict_2026(simGames, marginModelFinal, totalModelFinal)
+    winModel, winScaler = fit_win_model(games)
+    simFeatures = predict_2026(simGames, marginModelFinal, totalModelFinal, winModel, winScaler)
     print(simFeatures[["game_id", "week", "home_team", "away_team", "pred_margin", "pred_total"]])
 
     pd.set_option("display.max_rows", None)
